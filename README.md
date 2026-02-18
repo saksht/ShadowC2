@@ -462,9 +462,8 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 **Akshat**
 
-- 🔗 LinkedIn: [Your LinkedIn]
-- 📧 Email: [Your Email]
-- 🌐 Portfolio: [Your Website]
+- 🔗 LinkedIn: [https://www.linkedin.com/in/akshat-singh-0971832b5]
+- 📧 Email: [saksht0@gmail.com]
 
 ---
 
