@@ -1,0 +1,43 @@
+# ShadowC2 - Python Dependencies
+
+# Core Framework
+Flask==2.3.0
+flask-cors==4.0.0
+Werkzeug==2.3.0
+
+# Cryptography
+pycryptodome==3.18.0
+
+# Database
+# SQLite3 is built-in with Python
+
+# Networking
+requests==2.31.0
+urllib3==2.0.3
+
+# Agent Building
+pyinstaller==5.13.0
+
+# CLI Interface
+colorama==0.4.6
+prompt-toolkit==3.0.39
+
+# Utilities
+python-dotenv==1.0.0
+PyYAML==6.0.1
+
+# Date/Time
+python-dateutil==2.8.2
+
+# UUID generation (built-in)
+
+# JSON handling (built-in)
+
+# Optional: Web Dashboard UI
+Bootstrap-Flask==2.2.0
+
+# Development/Testing (optional)
+pytest==7.4.0
+pytest-cov==4.1.0
+black==23.7.0
+flake8==6.0.0
